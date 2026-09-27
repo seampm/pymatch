@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pymatch — live order book demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #0d1117; color: #e6edf3; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { padding: 28px 24px 8px; max-width: 1100px; margin: 0 auto; }
+  header h1 { font-size: 22px; font-weight: 600; }
+  header h1 span { color: #58a6ff; }
+  header p { color: #8b949e; font-size: 13px; margin-top: 8px; line-height: 1.6; }
+  header a { color: #58a6ff; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 24px 48px; }
+  .stats { display: flex; gap: 24px; flex-wrap: wrap; margin: 12px 0 16px; font-size: 13px; }
+  .stat b { display: block; font-size: 20px; font-weight: 600; }
+  .stat span { color: #8b949e; }
+  .pos { color: #3fb950; } .neg { color: #f85149; }
+  canvas { width: 100%; background: #161b22; border: 1px solid #30363d; border-radius: 8px; display: block; }
+  .controls { display: flex; gap: 12px; align-items: center; margin: 12px 0; font-size: 13px; color: #8b949e; }
+  button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  button:hover { background: #30363d; }
+  input[type=range] { flex: 1; accent-color: #58a6ff; }
+  .tape { margin-top: 16px; }
+  .tape h2, .sec h2 { font-size: 14px; margin-bottom: 8px; color: #8b949e; font-weight: 600; }
+  #trades { height: 180px; overflow-y: auto; font-size: 12px; border: 1px solid #30363d; border-radius: 8px; background: #161b22; padding: 8px 12px; }
+  #trades div { padding: 2px 0; border-bottom: 1px solid #21262d; display: flex; justify-content: space-between; }
+  .sec { margin-top: 28px; font-size: 13px; line-height: 1.7; color: #8b949e; }
+  .sec code { color: #e6edf3; background: #21262d; padding: 1px 5px; border-radius: 4px; }
+  .sec pre { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; overflow-x: auto; margin-top: 8px; color: #e6edf3; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pymatch <span>— live order book</span></h1>
+  <p>A real simulated session through the pymatch matching engine: background market flow plus an
+  inventory-skewed market maker, 500&thinsp;&micro;s exchange latency, maker/taker fees.
+  Depth is the top 10 levels per side. <a href="https://github.com/seampm/pymatch">Code on GitHub</a></p>
+</header>
+<main>
+  <div class="stats">
+    <div class="stat"><b id="s-mid">–</b><span>midprice (ticks)</span></div>
+    <div class="stat"><b id="s-spread">–</b><span>spread (ticks)</span></div>
+    <div class="stat"><b id="s-pnl">–</b><span>maker P&amp;L (ticks)</span></div>
+    <div class="stat"><b id="s-t">–</b><span>sim time</span></div>
+  </div>
+  <canvas id="depth" height="380"></canvas>
+  <div class="controls">
+    <button id="play">Pause</button>
+    <input type="range" id="scrub" min="0" max="100" value="0">
+    <span id="speed-label">1×</span>
+    <button id="slower">−</button>
+    <button id="faster">+</button>
+  </div>
+  <canvas id="equity" height="140"></canvas>
+  <div class="tape">
+    <h2>Trade tape (most recent first)</h2>
+    <div id="trades"></div>
+  </div>
+  <div class="sec">
+    <h2>What am I looking at?</h2>
+    <p>Green bars are resting <b>bid</b> (buy) liquidity, red bars are <b>ask</b> (sell) liquidity, centered on the
+    midprice. Every frame is a real snapshot from the Python engine — no mock data. The market maker's P&amp;L is
+    marked to the midprice each frame. Trades marked <code>MM</code> are the strategy's fills.</p>
+    <h2 style="margin-top:16px">Run it yourself</h2>
+    <pre>pip install pymatch
+python -c "
+from pymatch import MarketConfig, MarketMaker, run_backtest
+r = run_backtest(MarketMaker, MarketConfig(steps=3000, seed=7))
+print('P&L:', r.final_cash_ticks, 'ticks | Sharpe:', round(r.sharpe(), 2))
+"</pre>
+  </div>
+</main>
+<script>
+let D = null, idx = 0, playing = true, speed = 1, lastT = 0;
+const depthC = document.getElementById('depth'), eqC = document.getElementById('equity');
+const dctx = depthC.getContext('2d'), ectx = eqC.getContext('2d');
+const $ = id => document.getElementById(id);
+
+function fit(c) { const r = c.getBoundingClientRect(); c.width = r.width * 2; c.height = c.height * 2; }
+fit(depthC); fit(eqC);
+
+fetch('session.json').then(r => r.json()).then(d => {
+  D = d;
+  $('scrub').max = d.snapshots.length - 1;
+  requestAnimationFrame(tick);
+});
+
+function drawDepth(s) {
+  const W = depthC.width, H = depthC.height;
+  dctx.clearRect(0, 0, W, H);
+  const all = s.bids.concat(s.asks);
+  const maxQ = Math.max(...all.map(l => l[1]), 1);
+  const mid = s.mid;
+  const span = 14; // ticks each side
+  const x = p => W / 2 + (p - mid) / span * (W / 2 - 20);
+  const bw = Math.max(2, (W / 2 - 20) / span - 4);
+  for (const [p, q] of s.bids) {
+    const h = q / maxQ * (H - 60);
+    dctx.fillStyle = '#3fb950cc';
+    dctx.fillRect(x(p) - bw / 2, H - 20 - h, bw, h);
+  }
+  for (const [p, q] of s.asks) {
+    const h = q / maxQ * (H - 60);
+    dctx.fillStyle = '#f85149cc';
+    dctx.fillRect(x(p) - bw / 2, H - 20 - h, bw, h);
+  }
+  dctx.strokeStyle = '#58a6ff'; dctx.lineWidth = 2;
+  dctx.beginPath(); dctx.moveTo(W / 2, 0); dctx.lineTo(W / 2, H); dctx.stroke();
+  dctx.fillStyle = '#8b949e'; dctx.font = '20px monospace';
+  dctx.fillText('BIDS', 16, 30); dctx.fillText('ASKS', W - 80, 30);
+}
+
+function drawEquity() {
+  const W = eqC.width, H = eqC.height;
+  ectx.clearRect(0, 0, W, H);
+  const eq = D.snapshots.slice(0, idx + 1).map(s => s.equity);
+  if (eq.length < 2) return;
+  const mn = Math.min(...eq), mx = Math.max(...eq), rg = Math.max(1, mx - mn);
+  const X = i => i / (D.snapshots.length - 1) * W;
+  const Y = v => H - 10 - (v - mn) / rg * (H - 30);
+  ectx.strokeStyle = '#8b949e'; ectx.lineWidth = 1;
+  ectx.beginPath(); ectx.moveTo(0, Y(0)); ectx.lineTo(W, Y(0)); ectx.stroke();
+  ectx.strokeStyle = '#58a6ff'; ectx.lineWidth = 3; ectx.beginPath();
+  eq.forEach((v, i) => i ? ectx.lineTo(X(i), Y(v)) : ectx.moveTo(X(0), Y(v)));
+  ectx.stroke();
+  ectx.fillStyle = '#8b949e'; ectx.font = '20px monospace';
+  ectx.fillText('maker equity (ticks)', 16, 30);
+}
+
+function render() {
+  const s = D.snapshots[idx];
+  drawDepth(s); drawEquity();
+  const spread = s.asks[0][0] - s.bids[0][0];
+  $('s-mid').textContent = s.mid.toFixed(1);
+  $('s-spread').textContent = spread;
+  const pnl = $('s-pnl');
+  pnl.textContent = (s.equity >= 0 ? '+' : '') + s.equity;
+  pnl.className = s.equity >= 0 ? 'pos' : 'neg';
+  $('s-t').textContent = (s.t / 1e9).toFixed(2) + 's';
+  $('scrub').value = idx;
+  const shown = D.trades.filter(t => t.t <= s.t).slice(-30).reverse();
+  $('trades').innerHTML = shown.map(t =>
+    `<div><span>${(t.t / 1e9).toFixed(3)}s ${t.mine ? '<b style="color:#58a6ff">MM</b>' : ''}</span><span>${t.qty} @ ${t.price}</span></div>`
+  ).join('');
+}
+
+function tick(ts) {
+  if (D && playing) {
+    const dt = Math.min(100, ts - (lastT || ts)) / 1000;
+    idx = Math.min(D.snapshots.length - 1, idx + dt * 30 * speed);
+    if (idx >= D.snapshots.length - 1) playing = false, $('play').textContent = 'Replay';
+    render();
+  }
+  lastT = ts;
+  requestAnimationFrame(tick);
+}
+
+$('play').onclick = () => {
+  if (idx >= D.snapshots.length - 1) idx = 0;
+  playing = !playing;
+  $('play').textContent = playing ? 'Pause' : 'Play';
+};
+$('scrub').oninput = e => { idx = +e.target.value; render(); };
+$('slower').onclick = () => { speed = Math.max(0.25, speed / 2); $('speed-label').textContent = speed + '×'; };
+$('faster').onclick = () => { speed = Math.min(8, speed * 2); $('speed-label').textContent = speed + '×'; };
+</script>
+</body>
+</html>
