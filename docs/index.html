@@ -113,10 +113,10 @@ function drawDepth(s) {
   dctx.fillText('BIDS', 16, 30); dctx.fillText('ASKS', W - 80, 30);
 }
 
-function drawEquity() {
+function drawEquity(upto) {
   const W = eqC.width, H = eqC.height;
   ectx.clearRect(0, 0, W, H);
-  const eq = D.snapshots.slice(0, idx + 1).map(s => s.equity);
+  const eq = D.snapshots.slice(0, upto + 1).map(s => s.equity);
   if (eq.length < 2) return;
   const mn = Math.min(...eq), mx = Math.max(...eq), rg = Math.max(1, mx - mn);
   const X = i => i / (D.snapshots.length - 1) * W;
@@ -131,8 +131,9 @@ function drawEquity() {
 }
 
 function render() {
-  const s = D.snapshots[idx];
-  drawDepth(s); drawEquity();
+  const i = Math.floor(idx);
+  const s = D.snapshots[i];
+  drawDepth(s); drawEquity(i);
   const spread = s.asks[0][0] - s.bids[0][0];
   $('s-mid').textContent = s.mid.toFixed(1);
   $('s-spread').textContent = spread;
